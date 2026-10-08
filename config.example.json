@@ -4,6 +4,8 @@
 
   "holdMs": 300,
   "speed": 2.0,
+  "speedMin": 1.0,
+  "speedMax": 4.0,
 
   "clickMode": "swallowUp",
   "dragCancelPx": 12,

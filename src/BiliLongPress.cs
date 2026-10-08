@@ -218,6 +218,8 @@ namespace BiliLongPress
         public string ClientExe = "";
         public int HoldMs = 300;
         public double Speed = 2.0;
+        public double SpeedMin = 1.0;      // 滑块范围（步进固定 0.1x）
+        public double SpeedMax = 4.0;
         // passthrough: 完全不干预点击 | swallowUp: 长按后吞掉抬起事件(防暂停) | block: 拦住按下并回放短按
         public string ClickMode = "swallowUp";
         public int DragCancelPx = 12;
@@ -254,6 +256,8 @@ namespace BiliLongPress
             sb.AppendLine();
             sb.AppendLine("  \"holdMs\": " + HoldMs + ",");
             sb.AppendLine("  \"speed\": " + Speed.ToString("0.###", CultureInfo.InvariantCulture) + ",");
+            sb.AppendLine("  \"speedMin\": " + SpeedMin.ToString("0.###", CultureInfo.InvariantCulture) + ",");
+            sb.AppendLine("  \"speedMax\": " + SpeedMax.ToString("0.###", CultureInfo.InvariantCulture) + ",");
             sb.AppendLine();
             sb.AppendLine("  \"clickMode\": " + Json.EncodeString(ClickMode) + ",");
             sb.AppendLine("  \"dragCancelPx\": " + DragCancelPx + ",");
@@ -307,6 +311,8 @@ namespace BiliLongPress
                         c.ClientExe = Json.Str(Get(root, "clientExe"), c.ClientExe);
                         c.HoldMs = (int)Json.Num(Get(root, "holdMs"), c.HoldMs);
                         c.Speed = Json.Num(Get(root, "speed"), c.Speed);
+                        c.SpeedMin = Json.Num(Get(root, "speedMin"), c.SpeedMin);
+                        c.SpeedMax = Json.Num(Get(root, "speedMax"), c.SpeedMax);
                         c.ClickMode = Json.Str(Get(root, "clickMode"), c.ClickMode);
                         c.DragCancelPx = (int)Json.Num(Get(root, "dragCancelPx"), c.DragCancelPx);
                         c.BottomExcludeCssPx = (int)Json.Num(Get(root, "bottomExcludeCssPx"), c.BottomExcludeCssPx);
@@ -326,6 +332,10 @@ namespace BiliLongPress
 
             if (c.HoldMs < 80) c.HoldMs = 80;
             if (c.Speed <= 0) c.Speed = 2.0;
+            if (c.SpeedMin < 0.1) c.SpeedMin = 0.1;
+            if (c.SpeedMax < c.SpeedMin + 0.1) c.SpeedMax = c.SpeedMin + 0.1;
+            if (c.Speed < c.SpeedMin) c.Speed = c.SpeedMin;
+            if (c.Speed > c.SpeedMax) c.Speed = c.SpeedMax;
             if (c.PollMs < 100) c.PollMs = 100;
             if (string.IsNullOrEmpty(c.LogDir)) c.LogDir = DefaultLogDir;
 
@@ -1225,13 +1235,15 @@ return JSON.stringify({ok:1,want:want,got:got,fixed:fixed});
         static NotifyIcon _icon;
         static Config _cfg;
         static Tracker _tracker;
+        static ContextMenuStrip _menu;
         static ToolStripMenuItem _status;
-        static ToolStripMenuItem _speedMenu, _holdMenu;
-        static readonly List<ToolStripMenuItem> _speedItems = new List<ToolStripMenuItem>();
+        static ToolStripMenuItem _speedLabel, _holdMenu;
+        static TrackBar _speedSlider;
+        static System.Windows.Forms.Timer _saveTimer;
+        static bool _speedDirty, _syncing;
         static readonly List<ToolStripMenuItem> _holdItems = new List<ToolStripMenuItem>();
 
-        // 右键菜单里可选的倍速与触发时长
-        static readonly double[] SpeedPresets = { 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0 };
+        // 右键菜单里可选的触发时长（倍速改成滑块了）
         static readonly int[] HoldPresets = { 200, 250, 300, 400, 500 };
 
         public static string FmtSpeed(double v) { return v.ToString("0.##", CultureInfo.InvariantCulture) + "x"; }
@@ -1244,23 +1256,84 @@ return JSON.stringify({ok:1,want:want,got:got,fixed:fixed});
             _cfg = cfg;
             _tracker = tracker;
 
+            var menu = BuildMenu(cfg);
+
+            _icon = new NotifyIcon
+            {
+                Icon = MakeIcon(),
+                Text = "哔哩哔哩 长按倍速",
+                Visible = true,
+                ContextMenuStrip = menu,
+            };
+
+            _saveTimer = new System.Windows.Forms.Timer { Interval = 500 };
+            _saveTimer.Tick += (s, e) => FlushSpeed();
+
+            var timer = new System.Windows.Forms.Timer { Interval = 1000 };
+            timer.Tick += (s, e) => Refresh();
+            timer.Start();
+
+            NormalizeSpeed();
+            SyncMenus();
+        }
+
+        /// <summary>构建托盘右键菜单（--menu-preview 也用它，方便预览/测试）</summary>
+        public static ContextMenuStrip BuildMenu(Config cfg)
+        {
             var menu = new ContextMenuStrip();
+            _menu = menu;
             _status = new ToolStripMenuItem("状态：启动中…") { Enabled = false };
             menu.Items.Add(_status);
             menu.Items.Add(new ToolStripSeparator());
 
-            // ---- 长按倍速 ----
-            _speedMenu = new ToolStripMenuItem("长按倍速");
-            foreach (double v in SpeedPresets)
+            // ---- 长按倍速：滑块，步进 0.1x ----
+            _speedLabel = new ToolStripMenuItem("长按倍速") { Enabled = false };
+            menu.Items.Add(_speedLabel);
+
+            _speedSlider = new TrackBar
             {
-                double val = v;
-                var it = new ToolStripMenuItem(FmtSpeed(val)) { Tag = val };
-                it.Click += (s, e) => SetSpeed(val);
-                _speedItems.Add(it);
-                _speedMenu.DropDownItems.Add(it);
-            }
-            if (!IsPreset(SpeedPresets, cfg.Speed)) AddCustomSpeed(cfg.Speed);
-            menu.Items.Add(_speedMenu);
+                Minimum = (int)Math.Round(cfg.SpeedMin * 10),
+                Maximum = (int)Math.Round(cfg.SpeedMax * 10),
+                SmallChange = 1,                       // 方向键 = 0.1x
+                LargeChange = 5,
+                TickStyle = TickStyle.None,
+                AutoSize = false,
+                Height = 32,
+                Width = 240,
+                Value = ClampSlider(cfg, cfg.Speed),
+            };
+            _speedSlider.Scroll += (s, e) => OnSliderMoved(false);
+            _speedSlider.ValueChanged += (s, e) => OnSliderMoved(false);
+            _speedSlider.MouseUp += (s, e) => OnSliderMoved(true);
+            _speedSlider.KeyUp += (s, e) => OnSliderMoved(true);
+            menu.Items.Add(new ToolStripControlHost(_speedSlider)
+            {
+                AutoSize = false,
+                Size = new Size(248, 32),
+                Margin = new Padding(8, 2, 8, 0),
+            });
+
+            var ends = new Panel { Width = 240, Height = 16 };
+            ends.Controls.Add(new Label
+            {
+                Text = FmtSpeed(cfg.SpeedMin),
+                Dock = DockStyle.Left,
+                AutoSize = true,
+                ForeColor = SystemColors.GrayText,
+            });
+            ends.Controls.Add(new Label
+            {
+                Text = FmtSpeed(cfg.SpeedMax),
+                Dock = DockStyle.Right,
+                AutoSize = true,
+                ForeColor = SystemColors.GrayText,
+            });
+            menu.Items.Add(new ToolStripControlHost(ends)
+            {
+                AutoSize = false,
+                Size = new Size(248, 18),
+                Margin = new Padding(8, 0, 8, 4),
+            });
 
             // ---- 触发时长 ----
             _holdMenu = new ToolStripMenuItem("触发时长");
@@ -1305,41 +1378,98 @@ return JSON.stringify({ok:1,want:want,got:got,fixed:fixed});
 
             menu.Items.Add(new ToolStripSeparator());
             var quit = new ToolStripMenuItem("退出");
-            quit.Click += (s, e) => { _icon.Visible = false; Application.Exit(); };
+            quit.Click += (s, e) => { if (_icon != null) _icon.Visible = false; Application.Exit(); };
             menu.Items.Add(quit);
 
-            _icon = new NotifyIcon
-            {
-                Icon = MakeIcon(),
-                Text = "哔哩哔哩 长按倍速",
-                Visible = true,
-                ContextMenuStrip = menu,
-            };
-
-            var timer = new System.Windows.Forms.Timer { Interval = 1000 };
-            timer.Tick += (s, e) => Refresh();
-            timer.Start();
-            SyncMenus();
+            UpdateSpeedLabel();
+            return menu;
         }
 
-        static bool IsPreset(double[] list, double v)
+        static int ClampSlider(Config cfg, double v)
         {
-            foreach (double x in list) if (Math.Abs(x - v) < 0.001) return true;
-            return false;
+            int s = (int)Math.Round(v * 10);
+            int lo = (int)Math.Round(cfg.SpeedMin * 10);
+            int hi = (int)Math.Round(cfg.SpeedMax * 10);
+            if (s < lo) s = lo;
+            if (s > hi) s = hi;
+            return s;
+        }
+
+        static void UpdateSpeedLabel()
+        {
+            if (_speedLabel != null && _cfg != null)
+                _speedLabel.Text = "长按倍速（当前 " + FmtSpeed(_cfg.Speed) + "）";
+        }
+
+        /// <summary>滑块动了：立刻生效；persist=true（松手/松键）时落盘</summary>
+        static void OnSliderMoved(bool persist)
+        {
+            if (_cfg == null || _speedSlider == null || _syncing) return;
+            double v = Math.Round(_speedSlider.Value / 10.0, 1);
+            bool changed = Math.Abs(v - _cfg.Speed) > 0.0001;
+            if (changed) { _cfg.Speed = v; _speedDirty = true; }
+            UpdateSpeedLabel();
+
+            if (persist) { FlushSpeed(); return; }        // 松手就落盘（这次回调即使没变化）
+            if (!changed) return;
+            if (_saveTimer != null) { _saveTimer.Stop(); _saveTimer.Start(); }   // 拖动中不写盘，停手 500ms 后再写
+            Log.Debug("滑块倍速 -> " + FmtSpeed(v));
+        }
+
+        /// <summary>诊断用：程序化拖动滑块（等价于把滑块从当前值拖到 target 并松手）</summary>
+        public static void SimulateSlider(double target)
+        {
+            if (_speedSlider == null) return;
+            int want = ClampSlider(_cfg, target);
+            int from = _speedSlider.Value;
+            int step = want >= from ? 1 : -1;
+            for (int v = from; ; v += step)
+            {
+                _speedSlider.Value = v;          // 触发 ValueChanged -> OnSliderMoved(false)
+                if (v == want) break;
+                if (step > 0 && v > want) break;
+                if (step < 0 && v < want) break;
+            }
+            OnSliderMoved(true);                 // 等价于松手
+        }
+
+        public static string SliderState()
+        {
+            if (_speedSlider == null) return "(no slider)";
+            return "slider.Value=" + _speedSlider.Value
+                 + " min=" + _speedSlider.Minimum + " max=" + _speedSlider.Maximum
+                 + " label=\"" + (_speedLabel == null ? "?" : _speedLabel.Text) + "\""
+                 + " cfg.Speed=" + (_cfg == null ? 0 : _cfg.Speed).ToString("0.###", CultureInfo.InvariantCulture);
+        }
+
+        static void FlushSpeed()
+        {
+            if (_saveTimer != null) _saveTimer.Stop();
+            if (!_speedDirty || _cfg == null) return;
+            _speedDirty = false;
+            SaveConfig();
+            Log.Write("长按倍速已设为 " + FmtSpeed(_cfg.Speed));
+        }
+
+        /// <summary>把配置里的倍速对齐到 0.1x 步进（1.75 这类值不在格子上）</summary>
+        static void NormalizeSpeed()
+        {
+            double v = _cfg.Speed;
+            if (v < _cfg.SpeedMin) v = _cfg.SpeedMin;
+            if (v > _cfg.SpeedMax) v = _cfg.SpeedMax;
+            v = Math.Round(v, 1, MidpointRounding.AwayFromZero);
+            if (Math.Abs(v - _cfg.Speed) > 0.0001)
+            {
+                Log.Write("倍速 " + FmtSpeed(_cfg.Speed) + " 不在 0.1x 步进上，已调整为 " + FmtSpeed(v));
+                _cfg.Speed = v;
+                SaveConfig();
+            }
         }
 
         static bool IsPresetInt(int[] list, int v)
         {
             foreach (int x in list) if (x == v) return true;
             return false;
-        }
-
-        static void AddCustomSpeed(double v)
-        {
-            var it = new ToolStripMenuItem(FmtSpeed(v)) { Tag = v };
-            it.Click += (s, e) => SetSpeed(v);
-            _speedItems.Insert(0, it);
-            _speedMenu.DropDownItems.Insert(0, it);
         }
 
         static void AddCustomHold(int ms)
@@ -1350,17 +1480,14 @@ return JSON.stringify({ok:1,want:want,got:got,fixed:fixed});
             _holdMenu.DropDownItems.Insert(0, it);
         }
 
-        /// <summary>设置长按倍速（菜单点击 / 命令行都走这里）：立即生效并写回 config.json</summary>
+        /// <summary>设置长按倍速（命令行 / 滑块都走这里）：对齐 0.1x，立即生效并写回 config.json</summary>
         public static void SetSpeed(double v)
         {
             if (v <= 0) return;
+            if (v < _cfg.SpeedMin) v = _cfg.SpeedMin;
+            if (v > _cfg.SpeedMax) v = _cfg.SpeedMax;
+            v = Math.Round(v, 1, MidpointRounding.AwayFromZero);
             _cfg.Speed = v;
-            if (!IsPreset(SpeedPresets, v) && _speedMenu != null)
-            {
-                bool has = false;
-                foreach (var it in _speedItems) if (Math.Abs((double)it.Tag - v) < 0.001) has = true;
-                if (!has) AddCustomSpeed(v);
-            }
             SaveConfig();
             SyncMenus();
             Log.Write("长按倍速已设为 " + FmtSpeed(v));
@@ -1388,24 +1515,27 @@ return JSON.stringify({ok:1,want:want,got:got,fixed:fixed});
             catch (Exception ex) { Log.Write("保存配置失败: " + ex.Message); }
         }
 
-        /// <summary>把菜单勾选状态与当前配置同步（没有托盘时也能安全调用）</summary>
+        /// <summary>把菜单控件状态与当前配置同步（没有托盘时也能安全调用）</summary>
         static void SyncMenus()
         {
             try
             {
                 if (_cfg == null) return;
-                if (_speedMenu != null)
+                if (_speedSlider != null)
                 {
-                    _speedMenu.Text = "长按倍速（当前 " + FmtSpeed(_cfg.Speed) + "）";
-                    foreach (var it in _speedItems) it.Checked = Math.Abs((double)it.Tag - _cfg.Speed) < 0.001;
+                    _syncing = true;
+                    int want = ClampSlider(_cfg, _cfg.Speed);
+                    if (_speedSlider.Value != want) _speedSlider.Value = want;
+                    _syncing = false;
                 }
+                UpdateSpeedLabel();
                 if (_holdMenu != null)
                 {
                     _holdMenu.Text = "触发时长（当前 " + _cfg.HoldMs + " 毫秒）";
                     foreach (var it in _holdItems) it.Checked = Math.Abs((double)it.Tag - _cfg.HoldMs) < 0.001;
                 }
             }
-            catch (Exception ex) { Log.Write("刷新菜单勾选失败: " + ex.Message); }
+            catch (Exception ex) { Log.Write("刷新菜单状态失败: " + ex.Message); }
         }
 
         static volatile string _balloonTitle, _balloonText;
@@ -1529,14 +1659,30 @@ return JSON.stringify({ok:1,want:want,got:got,fixed:fixed});
         static void Main(string[] args)
         {
             Native.EnableDpiAwareness();
-            bool probe = false, speedtest = false, verbose = false;
-            double cliSpeed = 0;
+            bool probe = false, speedtest = false, verbose = false, menuPreview = false;
+            double cliSpeed = 0, sliderTest = 0;
             int cliHold = 0;
+            int pvX = 520, pvY = 360;
             foreach (var a in args)
             {
                 if (a == "--probe") probe = true;
                 if (a == "--speedtest") speedtest = true;
                 if (a == "--verbose") verbose = true;
+                if (a.StartsWith("--slider-test=", StringComparison.Ordinal))
+                {
+                    double.TryParse(a.Substring("--slider-test=".Length), NumberStyles.Float, CultureInfo.InvariantCulture, out sliderTest);
+                }
+                if (a.StartsWith("--menu-preview", StringComparison.Ordinal))
+                {
+                    menuPreview = true;
+                    string rest = a.Substring("--menu-preview".Length).TrimStart('=');
+                    string[] parts = rest.Split(',');
+                    if (parts.Length == 2)
+                    {
+                        int.TryParse(parts[0], out pvX);
+                        int.TryParse(parts[1], out pvY);
+                    }
+                }
                 if (a.StartsWith("--setspeed=", StringComparison.Ordinal))
                 {
                     double v;
@@ -1549,11 +1695,58 @@ return JSON.stringify({ok:1,want:want,got:got,fixed:fixed});
                 }
             }
             bool setOnly = cliSpeed > 0 || cliHold > 0;
-            if (probe || speedtest || setOnly) { ConsoleHost.Attach(); }
+            if (probe || speedtest || setOnly || sliderTest > 0) { ConsoleHost.Attach(); }
 
             var cfg = Config.Load();
             Log.Init(cfg.LogDir);
             Log.Verbose = cfg.VerboseLog || verbose;
+
+            // 诊断：把托盘菜单弹出来（方便截图/自动化验证菜单里的滑块）
+            if (menuPreview)
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Tray.Bind(cfg);
+                var prev = Tray.BuildMenu(cfg);
+                // 用一个不可见的宿主窗口当 owner：更接近真实托盘右键（前台窗口 + 鼠标捕获）
+                var host = new Form
+                {
+                    FormBorderStyle = FormBorderStyle.None,
+                    ShowInTaskbar = false,
+                    StartPosition = FormStartPosition.Manual,
+                    Location = new Point(pvX, pvY),
+                    Size = new Size(1, 1),
+                    TopMost = true,
+                };
+                host.Show();
+                host.Activate();
+                Native.SetForegroundWindow(host.Handle);
+                Thread.Sleep(200);
+                prev.Show(host, new Point(0, 0));
+                Application.Run(host);
+                return;
+            }
+
+            // 诊断：程序化拖动滑块，验证 取值 -> 配置 -> 落盘 这条链路
+            if (sliderTest > 0)
+            {
+                Application.EnableVisualStyles();
+                Tray.Bind(cfg);
+                Tray.BuildMenu(cfg);
+                Say("拖动前 : " + Tray.SliderState());
+                Tray.SimulateSlider(sliderTest);
+                Say("拖动后 : " + Tray.SliderState());
+                try
+                {
+                    var onDisk = Json.Dict(Json.Parse(File.ReadAllText(Config.ConfigPath, Encoding.UTF8)));
+                    Say("落盘值 : speed=" + Json.Num(onDisk["speed"], -1).ToString("0.###", CultureInfo.InvariantCulture)
+                        + "  speedMin=" + Json.Num(onDisk["speedMin"], -1).ToString("0.###", CultureInfo.InvariantCulture)
+                        + "  speedMax=" + Json.Num(onDisk["speedMax"], -1).ToString("0.###", CultureInfo.InvariantCulture));
+                }
+                catch (Exception ex) { Say("读回配置失败: " + ex.Message); }
+                FlushReport("slider-report.txt");
+                return;
+            }
 
             // 命令行直接改设置（和托盘菜单走同一套逻辑）
             if (setOnly)

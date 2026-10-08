@@ -26,7 +26,7 @@
 | 菜单项 | 说明 |
 | --- | --- |
 | 状态：… | 当前是否已就绪、识别到几个播放窗口 |
-| **长按倍速（当前 2x）** | 选 1.25x / 1.5x / 1.75x / 2x / 2.5x / 3x / 4x，点一下立即生效并写回配置文件 |
+| **长按倍速（当前 2x）** | 下面紧跟一个**滑块**：拖动即可在 1.0x–4.0x 之间调，**步进 0.1x**；拖动时立刻生效，松手自动写回配置文件 |
 | **触发时长（当前 300 毫秒）** | 选 200 / 250 / 300 / 400 / 500 毫秒，同样立即生效 |
 | 重启客户端并启用长按倍速 | 客户端已在运行但没开调试端口时用这个 |
 | 启动哔哩哔哩（带倍速支持） | 手动拉起客户端 |
@@ -37,14 +37,16 @@
 ## 配置
 
 首次运行会在 exe 同目录生成 `config.json`（也可以参考 `config.example.json`）。
-菜单里改的值会立即覆盖写回这个文件；想用菜单之外的数值（比如 2.2x），直接编辑即可，它也会出现在菜单里。
+滑块拖动、托盘菜单改的值都会立即覆盖写回这个文件；不在 0.1x 格子上的值（如 `1.75`）启动时会被吸附到最近的格子（`1.8`）并记进日志。
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `debugPort` | `9222` | Chromium 调试端口，只监听本机回环 |
 | `clientExe` | 自动探测 | 客户端 `哔哩哔哩.exe` 的完整路径 |
 | `holdMs` | `300` | 长按多少毫秒触发 |
-| `speed` | `2.0` | 长按时的倍速 |
+| `speed` | `2.0` | 长按时的倍速（自动吸附到 0.1x） |
+| `speedMin` | `1.0` | 滑块量程下限 |
+| `speedMax` | `4.0` | 滑块量程上限 |
 | `clickMode` | `swallowUp` | 见下方「三种点击模式」 |
 | `dragCancelPx` | `12` | 按住后移动超过这么多像素就取消 |
 | `bottomExcludeCssPx` | `100` | 取不到控制条位置时，底部排除多少像素 |
@@ -123,8 +125,10 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 .\BiliLongPress.exe --probe          # 输出热区、窗口矩形、识别到的播放器（写 probe-report.txt）
 .\BiliLongPress.exe --speedtest      # 不经过鼠标，直接测倍速通道（前值 → 设定值 → 恢复值）
 .\BiliLongPress.exe --verbose        # 详细日志
-.\BiliLongPress.exe --setspeed=1.75  # 等价于托盘菜单选 1.75x（立即存盘）
-.\BiliLongPress.exe --sethold=250    # 等价于托盘菜单选 250 毫秒
+.\BiliLongPress.exe --setspeed=1.75    # 等价于把滑块拖到 1.8x（自动吸附 0.1x，立即存盘）
+.\BiliLongPress.exe --sethold=250      # 等价于托盘菜单选 250 毫秒
+.\BiliLongPress.exe --slider-test=3.4  # 不弹窗，程序化拖动滑块并打印取值/落盘结果
+.\BiliLongPress.exe --menu-preview     # 把托盘菜单弹出到屏幕中间（截图/调试 UI 用）
 ```
 
 端到端测试（模拟真实鼠标长按/点击/拖动，需要 node 在 PATH 里，且播放器里有视频）：
