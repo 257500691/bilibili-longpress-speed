@@ -1,0 +1,22 @@
+{
+  "debugPort": 9222,
+  "clientExe": "C:\\Program Files\\bilibili\\哔哩哔哩.exe",
+
+  "holdMs": 300,
+  "speed": 2.0,
+
+  "clickMode": "swallowUp",
+  "dragCancelPx": 12,
+
+  "bottomExcludeCssPx": 100,
+  "topExcludeCssPx": 0,
+
+  "pollMs": 400,
+  "autoLaunchClient": true,
+  "autoRestartClient": false,
+  "showNotifications": true,
+  "resumeWhenPaused": false,
+  "restorePauseState": true,
+  "verboseLog": false,
+  "logDir": ""
+}

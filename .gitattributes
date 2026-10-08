@@ -1,0 +1,8 @@
+# 统一换行，避免 Windows/Linux 之间来回转换
+* text=auto eol=lf
+
+# 二进制
+*.exe binary
+*.dll binary
+*.png binary
+*.ico binary

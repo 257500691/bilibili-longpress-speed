@@ -1,0 +1,16 @@
+# 运行时生成的文件
+config.json
+probe-report.txt
+speedtest-report.txt
+setting-report.txt
+out.txt
+*.log
+
+# 编译产物（dist 里的 exe 是故意提交的，这里不忽略）
+*.pdb
+*.obj
+
+# 编辑器
+.vs/
+.idea/
+*.user
